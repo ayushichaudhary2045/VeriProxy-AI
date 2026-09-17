@@ -16,6 +16,7 @@ export default function Home() {
   const lastDropRef = useRef<number>(0);
   const noFaceSinceRef = useRef<number | null>(null);
   const lastTimestampRef = useRef<number>(0);
+  const lastDetectionRef = useRef<number>(0);
 
   const [cameraOn, setCameraOn] = useState(false);
   const [score, setScore] = useState(100);
@@ -25,6 +26,26 @@ export default function Home() {
   );
 
   const statusRef = useRef("Waiting for behavioral analysis...");
+
+  // Filter out MediaPipe non-fatal INFO log from Next.js error overlay
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const originalError = console.error;
+      console.error = (...args: any[]) => {
+        if (
+          typeof args[0] === "string" &&
+          args[0].includes("INFO: Created TensorFlow Lite")
+        ) {
+          return;
+        }
+        originalError.apply(console, args);
+      };
+
+      return () => {
+        console.error = originalError;
+      };
+    }
+  }, []);
 
   // -----------------------------------------
   // UPDATE SCORE
@@ -223,6 +244,8 @@ export default function Home() {
       previousGazeRef.current = null;
       lastDropRef.current = 0;
       noFaceSinceRef.current = null;
+      lastTimestampRef.current = 0;
+      lastDetectionRef.current = 0;
 
       statusRef.current =
         "Behavioral analysis active";
@@ -289,22 +312,12 @@ export default function Home() {
 
   const detectFace = () => {
     const video = videoRef.current;
+    const faceLandmarker = faceLandmarkerRef.current;
 
-    const faceLandmarker =
-      faceLandmarkerRef.current;
-
-    // If MediaPipe is not ready,
-    // try again on next frame.
     if (!video || !faceLandmarker) {
-      animationRef.current =
-        requestAnimationFrame(detectFace);
-
+      animationRef.current = requestAnimationFrame(detectFace);
       return;
     }
-
-    // -----------------------------------------
-    // VIDEO MUST BE READY
-    // -----------------------------------------
 
     if (
       video.readyState < 2 ||
@@ -313,185 +326,115 @@ export default function Home() {
       video.paused ||
       video.ended
     ) {
-      animationRef.current =
-        requestAnimationFrame(detectFace);
-
+      animationRef.current = requestAnimationFrame(detectFace);
       return;
     }
 
     try {
-      // -----------------------------------------
-      // MEDIA PIPE VIDEO DETECTION
-      // -----------------------------------------
-
       const timestamp = Math.max(
-  performance.now(),
-  lastTimestampRef.current + 1
-);
+        performance.now(),
+        lastTimestampRef.current + 1
+      );
+      lastTimestampRef.current = timestamp;
 
-lastTimestampRef.current = timestamp;
+      const nowMs = performance.now();
+      if (nowMs - lastDetectionRef.current < 33) {
+        animationRef.current = requestAnimationFrame(detectFace);
+        return;
+      }
+      lastDetectionRef.current = nowMs;
 
-const results = faceLandmarker.detectForVideo(video, timestamp);
+      const results = faceLandmarker.detectForVideo(video, timestamp);
 
       // -----------------------------------------
       // FACE FOUND
       // -----------------------------------------
-
-      if (
-        results.faceLandmarks &&
-        results.faceLandmarks.length > 0
-      ) {
-        const landmarks =
-          results.faceLandmarks[0];
-
+      if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+        const landmarks = results.faceLandmarks[0];
         noFaceSinceRef.current = null;
 
-        // -----------------------------------------
-        // IRIS LANDMARKS
-        // -----------------------------------------
+        // Landmarks for Eyes & Iris
+        const leftIris = landmarks[468];
+        const rightIris = landmarks[473];
 
-        const leftIris =
-          landmarks[468];
+        const leftOuter = landmarks[33];
+        const leftInner = landmarks[133];
+        const rightInner = landmarks[362];
+        const rightOuter = landmarks[263];
 
-        const rightIris =
-          landmarks[473];
+        if (
+          leftIris &&
+          rightIris &&
+          leftOuter &&
+          leftInner &&
+          rightInner &&
+          rightOuter
+        ) {
+          const leftWidth = leftOuter.x - leftInner.x;
+          const rightWidth = rightOuter.x - rightInner.x;
 
-        if (leftIris && rightIris) {
-          const gazeX =
-            (leftIris.x +
-              rightIris.x) /
-            2;
+          const leftRatio =
+            Math.abs(leftWidth) > 0.001
+              ? (leftIris.x - leftInner.x) / leftWidth
+              : 0.5;
 
-          const previousGaze =
-            previousGazeRef.current;
+          const rightRatio =
+            Math.abs(rightWidth) > 0.001
+              ? (rightIris.x - rightInner.x) / rightWidth
+              : 0.5;
 
-          // -----------------------------------------
-          // GAZE MOVEMENT
-          // -----------------------------------------
+          const currentGazeX = (leftRatio + rightRatio) / 2;
 
-          if (
-            previousGaze !== null
-          ) {
-            const movement =
-              Math.abs(
-                gazeX -
-                  previousGaze
-              );
+          const previousGaze = previousGazeRef.current;
 
-            const now =
-              Date.now();
+          if (previousGaze !== null) {
+            // Lowered threshold to 0.04 to detect normal eye turns
+            const movementX = Math.abs(currentGazeX - previousGaze);
 
-            if (
-              movement > 0.08 &&
-              now -
-                lastDropRef.current >
-                1500
-            ) {
-              lastDropRef.current =
-                now;
+            const now = Date.now();
 
-              applyRiskAdjustment(
-                5,
-                "Horizontal gaze movement detected"
-              );
+            if (movementX > 0.04 && now - lastDropRef.current > 1200) {
+              lastDropRef.current = now;
+              applyRiskAdjustment(5, "Horizontal gaze movement detected");
             }
           }
 
-          previousGazeRef.current =
-            gazeX;
+          previousGazeRef.current = currentGazeX;
         }
 
-        // -----------------------------------------
-        // NORMAL STATUS
-        // -----------------------------------------
-
-        if (
-          statusRef.current !==
-          "Face detected — monitoring gaze"
-        ) {
-          statusRef.current =
-            "Face detected — monitoring gaze";
-
-          setAnalysisStatus(
-            "Face detected — monitoring gaze"
-          );
+        if (statusRef.current !== "Face detected — monitoring gaze") {
+          statusRef.current = "Face detected — monitoring gaze";
+          setAnalysisStatus("Face detected — monitoring gaze");
         }
       }
 
       // -----------------------------------------
       // FACE NOT FOUND
       // -----------------------------------------
-
       else {
-        const now =
-          Date.now();
+        const now = Date.now();
 
-        if (
-          noFaceSinceRef.current ===
-          null
-        ) {
-          noFaceSinceRef.current =
-            now;
+        if (noFaceSinceRef.current === null) {
+          noFaceSinceRef.current = now;
         }
 
-        const timeWithoutFace =
-          now -
-          noFaceSinceRef.current;
+        const timeWithoutFace = now - noFaceSinceRef.current;
 
-        if (
-          timeWithoutFace >
-          2000
-        ) {
-          applyRiskAdjustment(
-            8,
-            "Face lost — attention risk"
-          );
-
-          // Reset timer so the score
-          // doesn't continuously drop
-          noFaceSinceRef.current =
-            now;
+        if (timeWithoutFace > 2000) {
+          applyRiskAdjustment(8, "Face lost — attention risk");
+          noFaceSinceRef.current = now;
         }
 
-        if (
-          statusRef.current !==
-          "Face not detected"
-        ) {
-          statusRef.current =
-            "Face not detected";
-
-          setAnalysisStatus(
-            "Face not detected"
-          );
+        if (statusRef.current !== "Face not detected") {
+          statusRef.current = "Face not detected";
+          setAnalysisStatus("Face not detected");
         }
       }
     } catch (error) {
-      console.error(
-        "MediaPipe frame error:",
-        error
-      );
-
-      if (
-        statusRef.current !==
-        "MediaPipe frame error"
-      ) {
-        statusRef.current =
-          "MediaPipe frame error";
-
-        setAnalysisStatus(
-          "MediaPipe frame error"
-        );
-      }
+      console.error("MediaPipe frame error:", error);
     }
 
-    // -----------------------------------------
-    // NEXT FRAME
-    // -----------------------------------------
-
-    animationRef.current =
-      requestAnimationFrame(
-        detectFace
-      );
+    animationRef.current = requestAnimationFrame(detectFace);
   };
 
   // -----------------------------------------

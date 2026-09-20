@@ -15,20 +15,9 @@ interface ViolationLog {
   points: number;
 }
 
-function horizontalRatio(
-  cornerA: { x: number },
-  cornerB: { x: number },
-  iris: { x: number }
-) {
-  const min = Math.min(cornerA.x, cornerB.x);
-  const max = Math.max(cornerA.x, cornerB.x);
-  if (max - min < 0.001) return 0.5;
-  return (iris.x - min) / (max - min);
-}
-
 export default function Home() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
@@ -45,22 +34,21 @@ export default function Home() {
 
   const noFaceSinceRef = useRef<number | null>(null);
   const lastTimestampRef = useRef<number>(0);
-  const lastDetectionRef = useRef<number>(0);
 
-  const [cameraOn, setCameraOn] = useState(false);
-  const [score, setScore] = useState(100);
+  const [cameraOn, setCameraOn] = useState<boolean>(false);
+  const [score, setScore] = useState<number>(100);
 
-  const [analysisStatus, setAnalysisStatus] = useState(
+  const [analysisStatus, setAnalysisStatus] = useState<string>(
     "Waiting for behavioral analysis..."
   );
   const [logs, setLogs] = useState<ViolationLog[]>([]);
 
-  const statusRef = useRef("Waiting for behavioral analysis...");
+  const statusRef = useRef<string>("Waiting for behavioral analysis...");
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const originalError = console.error;
-      console.error = (...args: any[]) => {
+      console.error = (...args: unknown[]) => {
         if (
           typeof args[0] === "string" &&
           args[0].includes("INFO: Created TensorFlow Lite")
@@ -111,47 +99,6 @@ export default function Home() {
     ]);
   };
 
-  useEffect(() => {
-    const checkConnectedDevices = async () => {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-
-        const foreignDevice = devices.find((device) => {
-          const label = device.label.toLowerCase();
-          return (
-            label.includes("bluetooth") ||
-            label.includes("airpods") ||
-            label.includes("headset") ||
-            label.includes("wireless") ||
-            label.includes("buds") ||
-            label.includes("hands-free")
-          );
-        });
-
-        if (foreignDevice) {
-          applyRiskAdjustment(
-            10,
-            `External Audio Connected: ${
-              foreignDevice.label || "Wireless/Bluetooth Device"
-            }`
-          );
-        }
-      } catch (err) {
-        console.error("Device detection error:", err);
-      }
-    };
-
-    checkConnectedDevices();
-    navigator.mediaDevices.addEventListener("devicechange", checkConnectedDevices);
-
-    return () => {
-      navigator.mediaDevices.removeEventListener(
-        "devicechange",
-        checkConnectedDevices
-      );
-    };
-  }, []);
-
   const stopCameraStream = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -173,165 +120,51 @@ export default function Home() {
       animationRef.current = null;
     }
 
-    if (faceLandmarkerRef.current) {
-      faceLandmarkerRef.current.close();
-      faceLandmarkerRef.current = null;
-    }
-
-    if (handLandmarkerRef.current) {
-      handLandmarkerRef.current.close();
-      handLandmarkerRef.current = null;
-    }
-
     try {
       setAnalysisStatus("Starting camera...");
 
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Camera access is not supported in this browser.");
-      }
-
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: "user",
-        },
-        audio: true,
+        video: { width: 640, height: 480 },
+        audio: false,
       });
 
       const video = videoRef.current;
-      if (!video) {
-        stream.getTracks().forEach((track) => track.stop());
-        throw new Error("Video element was not found.");
-      }
+      if (!video) return;
 
       video.srcObject = stream;
-
-      await new Promise<void>((resolve, reject) => {
-        const timeout = window.setTimeout(() => {
-          reject(new Error("Camera video did not become ready."));
-        }, 10000);
-
-        const checkVideo = () => {
-          if (
-            video.readyState >= 2 &&
-            video.videoWidth > 0 &&
-            video.videoHeight > 0
-          ) {
-            window.clearTimeout(timeout);
-            resolve();
-          }
-        };
-
-        video.onloadedmetadata = checkVideo;
-        video.onloadeddata = checkVideo;
-        checkVideo();
-      });
-
       await video.play();
 
-      await new Promise<void>((resolve) => {
-        requestAnimationFrame(() => resolve());
-      });
-
       setCameraOn(true);
-      setAnalysisStatus("Initializing Face & Hand Detection...");
+      setAnalysisStatus("Loading Vision Models...");
 
       const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
       );
 
-      let faceLandmarker: FaceLandmarker;
-      try {
-        faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-            delegate: "GPU",
-          },
-          runningMode: "VIDEO",
-          numFaces: 1,
-          minFaceDetectionConfidence: 0.5,
-          minFacePresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        });
-      } catch (faceErr) {
-        console.error("FaceLandmarker failed to load:", faceErr);
-        throw new Error(
-          "Face detection model failed to load — check your internet connection."
-        );
-      }
-      faceLandmarkerRef.current = faceLandmarker;
+      faceLandmarkerRef.current = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        numFaces: 1,
+      });
 
-      let handLandmarker: HandLandmarker;
-      try {
-        handLandmarker = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-            delegate: "GPU",
-          },
-          runningMode: "VIDEO",
-          numHands: 2,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        });
-      } catch (handErr) {
-        console.error("HandLandmarker failed to load:", handErr);
-        throw new Error(
-          "Hand detection model failed to load — check your internet connection."
-        );
-      }
-      handLandmarkerRef.current = handLandmarker;
+      handLandmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        numHands: 2,
+      });
 
-      sideGazeFramesRef.current = 0;
-      verticalGazeFramesRef.current = 0;
-      lastSideDropRef.current = 0;
-      lastVerticalDropRef.current = 0;
-
-      handTouchStartRef.current = null;
-      lastHandDropRef.current = 0;
-
-      noFaceSinceRef.current = null;
-      lastTimestampRef.current = 0;
-      lastDetectionRef.current = 0;
-
-      statusRef.current = "Behavioral analysis active";
       setAnalysisStatus("Behavioral analysis active");
-      console.log("✅ Both models loaded — detection loop starting now.");
-
-      startDetection();
+      detectFaceAndHands();
     } catch (error) {
-      console.error("Camera / MediaPipe error:", error);
-      setCameraOn(false);
-
-      const isCameraBusy =
-        error instanceof DOMException && error.name === "NotReadableError";
-      const isPermissionDenied =
-        error instanceof DOMException && error.name === "NotAllowedError";
-
-      let message = "Unable to start analysis.";
-      if (isCameraBusy) {
-        message =
-          "Camera is already in use. Close other apps using the camera and try again.";
-      } else if (isPermissionDenied) {
-        message =
-          "Camera/Audio permission was denied. Allow permissions and try again.";
-      } else if (error instanceof Error) {
-        message = error.message;
-      }
-
-      setAnalysisStatus(message);
-      alert(message);
+      console.error("Initialization error:", error);
+      setAnalysisStatus("Error loading models or camera.");
     }
-  };
-
-  const startDetection = () => {
-    if (animationRef.current !== null) {
-      cancelAnimationFrame(animationRef.current);
-    }
-    animationRef.current = requestAnimationFrame(detectFaceAndHands);
   };
 
   const detectFaceAndHands = () => {
@@ -345,39 +178,20 @@ export default function Home() {
       return;
     }
 
-    if (
-      video.readyState < 2 ||
-      video.videoWidth <= 0 ||
-      video.videoHeight <= 0 ||
-      video.paused ||
-      video.ended
-    ) {
+    if (video.readyState < 2) {
       animationRef.current = requestAnimationFrame(detectFaceAndHands);
       return;
     }
 
     const ctx = canvas.getContext("2d");
-    if (
-      canvas.width !== video.videoWidth ||
-      canvas.height !== video.videoHeight
-    ) {
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
     }
 
     try {
-      const timestamp = Math.max(
-        performance.now(),
-        lastTimestampRef.current + 1
-      );
+      const timestamp = Math.max(performance.now(), lastTimestampRef.current + 1);
       lastTimestampRef.current = timestamp;
-
-      const nowMs = performance.now();
-      if (nowMs - lastDetectionRef.current < 33) {
-        animationRef.current = requestAnimationFrame(detectFaceAndHands);
-        return;
-      }
-      lastDetectionRef.current = nowMs;
 
       const faceResults = faceLandmarker.detectForVideo(video, timestamp);
       const handResults = handLandmarker.detectForVideo(video, timestamp);
@@ -386,12 +200,7 @@ export default function Home() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
       }
 
-      let faceBox: {
-        minX: number;
-        maxX: number;
-        minY: number;
-        maxY: number;
-      } | null = null;
+      let faceBox = { minX: 1, maxX: 0, minY: 1, maxY: 0 };
 
       if (faceResults.faceLandmarks && faceResults.faceLandmarks.length > 0) {
         const landmarks = faceResults.faceLandmarks[0];
@@ -399,11 +208,14 @@ export default function Home() {
 
         if (ctx) {
           const drawingUtils = new DrawingUtils(ctx);
+          
           drawingUtils.drawConnectors(
             landmarks,
             FaceLandmarker.FACE_LANDMARKS_TESSELATION,
             { color: "#C0C0C040", lineWidth: 1 }
           );
+
+          // Green Iris Ring & Centers
           drawingUtils.drawConnectors(
             landmarks,
             FaceLandmarker.FACE_LANDMARKS_RIGHT_IRIS,
@@ -414,123 +226,98 @@ export default function Home() {
             FaceLandmarker.FACE_LANDMARKS_LEFT_IRIS,
             { color: "#00FF66", lineWidth: 2 }
           );
+
+          [468, 473].forEach((index) => {
+            const point = landmarks[index];
+            if (point) {
+              ctx.beginPath();
+              ctx.arc(
+                point.x * canvas.width,
+                point.y * canvas.height,
+                4,
+                0,
+                2 * Math.PI
+              );
+              ctx.fillStyle = "#00FF66";
+              ctx.fill();
+            }
+          });
         }
 
-        let minX = 1,
-          maxX = 0,
-          minY = 1,
-          maxY = 0;
+        // Bounding Box Calculation
         landmarks.forEach((pt) => {
-          if (pt.x < minX) minX = pt.x;
-          if (pt.x > maxX) maxX = pt.x;
-          if (pt.y < minY) minY = pt.y;
-          if (pt.y > maxY) maxY = pt.y;
+          if (pt.x < faceBox.minX) faceBox.minX = pt.x;
+          if (pt.x > faceBox.maxX) faceBox.maxX = pt.x;
+          if (pt.y < faceBox.minY) faceBox.minY = pt.y;
+          if (pt.y > faceBox.maxY) faceBox.maxY = pt.y;
         });
 
-        faceBox = { minX, maxX, minY, maxY };
+        const nose = landmarks[1];
+        const leftCheek = landmarks[234];
+        const rightCheek = landmarks[454];
+        const forehead = landmarks[10];
+        const chin = landmarks[152];
 
-        const leftIris = landmarks[468];
-        const rightIris = landmarks[473];
+        const now = Date.now();
 
-        const leftOuter = landmarks[33];
-        const leftInner = landmarks[133];
-        const rightInner = landmarks[362];
-        const rightOuter = landmarks[263];
+        // --- 1. SIDE MOVEMENT DETECTION ---
+        const faceWidth = Math.abs(rightCheek.x - leftCheek.x);
+        const noseRatioH =
+          faceWidth > 0.001 ? (nose.x - leftCheek.x) / faceWidth : 0.5;
 
-        const leftTop = landmarks[159];
-        const leftBottom = landmarks[145];
-        const rightTop = landmarks[386];
-        const rightBottom = landmarks[374];
+        const isTurningSide = noseRatioH < 0.32 || noseRatioH > 0.68;
+
+        if (isTurningSide) {
+          sideGazeFramesRef.current += 1;
+        } else {
+          sideGazeFramesRef.current = Math.max(0, sideGazeFramesRef.current - 1);
+        }
+
+        if (sideGazeFramesRef.current >= 3 && now - lastSideDropRef.current > 2000) {
+          lastSideDropRef.current = now;
+          sideGazeFramesRef.current = 0;
+          applyRiskAdjustment(5, "Gaze Violation: Looking to the side");
+        }
+
+        // --- 2. UPWARD & DOWNWARD GAZE MOVEMENT DETECTION ---
+        const faceHeight = Math.abs(chin.y - forehead.y);
+        const noseRatioV =
+          faceHeight > 0.001 ? (nose.y - forehead.y) / faceHeight : 0.5;
+
+        // < 0.32 means Head/Gaze Up | > 0.62 means Head/Gaze Down
+        const isLookingUpOrDown = noseRatioV < 0.32 || noseRatioV > 0.62;
+
+        if (isLookingUpOrDown) {
+          verticalGazeFramesRef.current += 1;
+        } else {
+          verticalGazeFramesRef.current = Math.max(0, verticalGazeFramesRef.current - 1);
+        }
 
         if (
-          leftIris &&
-          rightIris &&
-          leftOuter &&
-          leftInner &&
-          rightInner &&
-          rightOuter &&
-          leftTop &&
-          leftBottom &&
-          rightTop &&
-          rightBottom
+          verticalGazeFramesRef.current >= 3 &&
+          now - lastVerticalDropRef.current > 2000
         ) {
-          const leftRatioH = horizontalRatio(leftOuter, leftInner, leftIris);
-          const rightRatioH = horizontalRatio(rightInner, rightOuter, rightIris);
-
-          const averageHorizontalRatio = (leftRatioH + rightRatioH) / 2;
-
-          const leftHeight = Math.abs(leftBottom.y - leftTop.y);
-          const rightHeight = Math.abs(rightBottom.y - rightTop.y);
-
-          const leftRatioV =
-            leftHeight > 0.001 ? (leftIris.y - leftTop.y) / leftHeight : 0.5;
-          const rightRatioV =
-            rightHeight > 0.001 ? (rightIris.y - rightTop.y) / rightHeight : 0.5;
-
-          const averageVerticalRatio = (leftRatioV + rightRatioV) / 2;
-
-          const isLookingSide =
-            averageHorizontalRatio < 0.32 || averageHorizontalRatio > 0.68;
-
-          const isLookingUp = averageVerticalRatio < 0.30;
-          const isLookingDown = averageVerticalRatio > 0.62;
-
-          const now = Date.now();
-
-          if (isLookingSide) {
-            sideGazeFramesRef.current += 1;
-          } else {
-            sideGazeFramesRef.current = Math.max(0, sideGazeFramesRef.current - 1);
-          }
-
-          if (
-            sideGazeFramesRef.current >= 5 &&
-            now - lastSideDropRef.current > 2500
-          ) {
-            lastSideDropRef.current = now;
-            sideGazeFramesRef.current = 0;
-            applyRiskAdjustment(5, "Eye direction violation: Looking to the side");
-          }
-
-          if (isLookingUp || isLookingDown) {
-            verticalGazeFramesRef.current += 1;
-          } else {
-            verticalGazeFramesRef.current = Math.max(
-              0,
-              verticalGazeFramesRef.current - 1
-            );
-          }
-
-          if (
-            verticalGazeFramesRef.current >= 4 &&
-            now - lastVerticalDropRef.current > 2500
-          ) {
-            lastVerticalDropRef.current = now;
-            verticalGazeFramesRef.current = 0;
-            const directionText = isLookingUp ? "upward" : "downward";
-            applyRiskAdjustment(
-              5,
-              `Eye direction violation: Looking ${directionText}`
-            );
-          }
+          lastVerticalDropRef.current = now;
+          verticalGazeFramesRef.current = 0;
+          const direction = noseRatioV < 0.32 ? "upward" : "downward";
+          applyRiskAdjustment(5, `Gaze Violation: Looking ${direction}`);
         }
+
       } else {
         const now = Date.now();
-        if (noFaceSinceRef.current === null) {
-          noFaceSinceRef.current = now;
-        }
+        if (noFaceSinceRef.current === null) noFaceSinceRef.current = now;
         if (now - noFaceSinceRef.current > 2000) {
           applyRiskAdjustment(5, "Face lost — attention risk");
           noFaceSinceRef.current = now;
         }
       }
 
-      let isHandCurrentlyOverFace = false;
+      // --- 3. HAND OVER FACE DETECTION ---
+      let isHandTouchingFace = false;
 
       if (
         handResults.landmarks &&
         handResults.landmarks.length > 0 &&
-        faceBox &&
         ctx
       ) {
         const drawingUtils = new DrawingUtils(ctx);
@@ -544,12 +331,12 @@ export default function Home() {
 
           handLandmarks.forEach((pt) => {
             if (
-              pt.x >= faceBox!.minX &&
-              pt.x <= faceBox!.maxX &&
-              pt.y >= faceBox!.minY &&
-              pt.y <= faceBox!.maxY
+              pt.x >= faceBox.minX - 0.05 &&
+              pt.x <= faceBox.maxX + 0.05 &&
+              pt.y >= faceBox.minY - 0.05 &&
+              pt.y <= faceBox.maxY + 0.05
             ) {
-              isHandCurrentlyOverFace = true;
+              isHandTouchingFace = true;
             }
           });
         });
@@ -557,14 +344,15 @@ export default function Home() {
 
       const now = Date.now();
 
-      if (isHandCurrentlyOverFace) {
+      if (isHandTouchingFace) {
         if (handTouchStartRef.current === null) {
           handTouchStartRef.current = now;
         }
 
-        const durationTouching = now - handTouchStartRef.current;
-
-        if (durationTouching > 1000 && now - lastHandDropRef.current > 3000) {
+        if (
+          now - handTouchStartRef.current > 400 &&
+          now - lastHandDropRef.current > 2500
+        ) {
           lastHandDropRef.current = now;
           applyRiskAdjustment(5, "Hand covering face/mouth detected");
         }
@@ -572,7 +360,7 @@ export default function Home() {
         handTouchStartRef.current = null;
       }
     } catch (error) {
-      console.error("MediaPipe processing error:", error);
+      console.error("Detection Loop Error:", error);
     }
 
     animationRef.current = requestAnimationFrame(detectFaceAndHands);
@@ -584,15 +372,6 @@ export default function Home() {
         cancelAnimationFrame(animationRef.current);
       }
       stopCameraStream();
-
-      if (faceLandmarkerRef.current) {
-        faceLandmarkerRef.current.close();
-        faceLandmarkerRef.current = null;
-      }
-      if (handLandmarkerRef.current) {
-        handLandmarkerRef.current.close();
-        handLandmarkerRef.current = null;
-      }
     };
   }, []);
 
@@ -603,7 +382,7 @@ export default function Home() {
           <div>
             <h1 className="text-2xl font-bold">VeriProxy-AI</h1>
             <p className="text-sm text-gray-400">
-              AI-Powered Interview Integrity Monitor
+              AI-Powered Behavioral Integrity Monitor
             </p>
           </div>
           <div
@@ -629,19 +408,12 @@ export default function Home() {
               autoPlay
               playsInline
               muted
-              className="h-full w-full object-cover"
+              className="h-full w-full object-cover -scale-x-100"
             />
-
             <canvas
               ref={canvasRef}
-              className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+              className="pointer-events-none absolute inset-0 h-full w-full object-cover -scale-x-100"
             />
-
-            {!cameraOn && (
-              <div className="absolute inset-0 flex items-center justify-center text-gray-500">
-                Camera preview
-              </div>
-            )}
           </div>
 
           <button
@@ -650,18 +422,6 @@ export default function Home() {
             className="mt-5 w-full rounded-xl bg-blue-600 px-5 py-3 font-semibold transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {cameraOn ? "Camera Active" : "Start Camera"}
-          </button>
-
-          <button
-            onClick={() =>
-              applyRiskAdjustment(
-                10,
-                "External Audio Flag: Bluetooth / Earbud Detected"
-              )
-            }
-            className="mt-3 w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-400 transition hover:bg-red-500/20"
-          >
-            ⚠️ Test Bluetooth Detection
           </button>
         </div>
 
